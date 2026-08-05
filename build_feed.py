@@ -19,6 +19,8 @@ Run:  ``python build_feed.py``  ->  writes ``feed.xml`` and ``index.html``.
 from __future__ import annotations
 
 import datetime as dt
+import email.utils
+import re
 import sys
 import time
 
@@ -36,6 +38,13 @@ MAX_ITEMS = 15          # how many recent roundups to include in the feed
 MAX_INDEX_PAGES = 4     # how many index pages to walk to collect MAX_ITEMS
 REQUEST_DELAY = 1.0     # seconds to wait between requests (be polite)
 TIMEOUT = 30            # per-request timeout in seconds
+FETCH_RETRIES = 3       # attempts per request before giving up
+
+# If nationalaffairs.com is unreachable (as in the Aug 2026 hosting outage,
+# when every path served a Cloudways maintenance stub), keep the existing
+# feed and exit 0 — but only while the feed is fresher than this. Past the
+# limit, fail loudly so a permanent move/restructure gets noticed.
+STALE_DAYS_LIMIT = 7
 
 # Set to False to publish a short excerpt + "Read on National Affairs" link
 # instead of the full roundup. The courteous choice if the feed URL is public.
@@ -54,9 +63,29 @@ session.headers.update({"User-Agent": USER_AGENT})
 # --- Helpers ----------------------------------------------------------------
 
 def fetch(url: str) -> str:
-    resp = session.get(url, timeout=TIMEOUT)
-    resp.raise_for_status()
-    return resp.text
+    for attempt in range(1, FETCH_RETRIES + 1):
+        try:
+            resp = session.get(url, timeout=TIMEOUT)
+            resp.raise_for_status()
+            return resp.text
+        except requests.RequestException:
+            if attempt == FETCH_RETRIES:
+                raise
+            time.sleep(5 * attempt)
+    raise AssertionError("unreachable")
+
+
+def feed_age_days() -> float | None:
+    """Age of the committed feed.xml, from its <lastBuildDate>."""
+    try:
+        with open("feed.xml", encoding="utf-8") as fh:
+            m = re.search(r"<lastBuildDate>([^<]+)</lastBuildDate>", fh.read())
+        if not m:
+            return None
+        built = email.utils.parsedate_to_datetime(m.group(1))
+        return (dt.datetime.now(dt.timezone.utc) - built).total_seconds() / 86400
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def parse_date(text: str) -> dt.datetime | None:
@@ -156,7 +185,22 @@ def make_excerpt(body_html: str, url: str) -> str:
 # --- Feed assembly ----------------------------------------------------------
 
 def build() -> None:
-    entries = collect_entries()
+    try:
+        entries = collect_entries()
+    except requests.RequestException as exc:
+        age = feed_age_days()
+        if age is not None and age <= STALE_DAYS_LIMIT:
+            print(
+                f"WARN: site unreachable ({exc}); existing feed is "
+                f"{age:.1f} days old, keeping it and exiting cleanly.",
+                file=sys.stderr,
+            )
+            return
+        sys.exit(
+            f"ERROR: site unreachable ({exc}) and the existing feed is "
+            f"older than {STALE_DAYS_LIMIT} days (or missing). The site may "
+            "have moved permanently — build_feed.py needs attention."
+        )
     if not entries:
         sys.exit(
             "ERROR: parsed zero entries from the index — the site's HTML "
