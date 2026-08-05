@@ -30,7 +30,9 @@ from feedgen.feed import FeedGenerator
 
 # --- Configuration ----------------------------------------------------------
 
-BASE = "https://www.nationalaffairs.com"
+# No "www." — since the site's Aug 2026 hosting move, www.nationalaffairs.com
+# serves a Cloudways domain-mapping stub (404) while the apex domain works.
+BASE = "https://nationalaffairs.com"
 INDEX_PATH = "/blog/findings-a-daily-roundup"
 DETAIL_PREFIX = "/blog/detail/findings-a-daily-roundup/"
 
